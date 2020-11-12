@@ -5,6 +5,7 @@ import sys
 import traceback
 import typing
 from contextlib import contextmanager
+from copy import copy
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple, Union
 
 import attr
@@ -2689,7 +2690,7 @@ def regs_clobbered_until_dominator(
     if node.immediate_dominator is None:
         return set()
     seen = {node.immediate_dominator}
-    stack = node.parents[:]
+    stack = copy(node.parents)
     clobbered = set()
     while stack:
         n = stack.pop()
@@ -2701,7 +2702,7 @@ def regs_clobbered_until_dominator(
                 clobbered.update(output_regs_for_instr(instr, typemap))
                 if instr.mnemonic in CASES_FN_CALL:
                     clobbered.update(TEMP_REGS)
-        stack.extend(n.parents)
+        stack.update(n.parents)
     return clobbered
 
 
@@ -2711,7 +2712,7 @@ def reg_always_set(
     if node.immediate_dominator is None:
         return False
     seen = {node.immediate_dominator}
-    stack = node.parents[:]
+    stack = copy(node.parents)
     while stack:
         n = stack.pop()
         if n == node.immediate_dominator and not dom_set:
@@ -2729,7 +2730,7 @@ def reg_always_set(
         if clobbered == True:
             return False
         if clobbered is None:
-            stack.extend(n.parents)
+            stack.update(n.parents)
     return True
 
 
@@ -3349,7 +3350,11 @@ class FunctionInfo:
 
 
 def translate_to_ast(
-    function: Function, options: Options, rodata: Rodata, typemap: Optional[TypeMap]
+    function: Function,
+    flow_graph: FlowGraph,
+    options: Options,
+    rodata: Rodata,
+    typemap: Optional[TypeMap],
 ) -> FunctionInfo:
     """
     Given a function, produce a FlowGraph that both contains control-flow
@@ -3357,7 +3362,6 @@ def translate_to_ast(
     branch condition.
     """
     # Initialize info about the function.
-    flow_graph: FlowGraph = build_flowgraph(function, rodata)
     start_node = flow_graph.entry_node()
     stack_info = get_stack_info(function, rodata, start_node, typemap)
 

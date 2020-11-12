@@ -18,6 +18,7 @@ class Options:
     void: bool = attr.ib()
     ifs: bool = attr.ib()
     andor_detection: bool = attr.ib()
+    loop_rerolling: bool = attr.ib()
     skip_casts: bool = attr.ib()
     goto_patterns: List[str] = attr.ib()
     rodata_files: List[str] = attr.ib()

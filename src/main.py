@@ -3,13 +3,14 @@ import sys
 import traceback
 from typing import List, Optional
 
+from .c_types import TypeMap, build_typemap, dump_typemap
 from .error import DecompFailure
-from .flow_graph import build_flowgraph, visualize_flowgraph
+from .flow_graph import FlowGraph, build_flowgraph, visualize_flowgraph
+from .loop_rerolling import reroll_loops
 from .if_statements import get_function_text
-from .options import Options, CodingStyle
+from .options import CodingStyle, Options
 from .parse_file import Function, MIPSFile, Rodata, parse_file
 from .translate import translate_to_ast
-from .c_types import TypeMap, build_typemap, dump_typemap
 
 
 def decompile_function(
@@ -19,11 +20,16 @@ def decompile_function(
         print(function)
         print()
 
+    flowgraph: FlowGraph = build_flowgraph(function, rodata)
+
+    if options.loop_rerolling:
+        flowgraph = reroll_loops(flowgraph)
+
     if options.visualize_flowgraph:
-        visualize_flowgraph(build_flowgraph(function, rodata))
+        visualize_flowgraph(flowgraph)
         return
 
-    function_info = translate_to_ast(function, options, rodata, typemap)
+    function_info = translate_to_ast(function, flowgraph, options, rodata, typemap)
     function_text = get_function_text(function_info, options)
     print(function_text)
 
@@ -123,6 +129,12 @@ def parse_flags(flags: List[str]) -> Options:
         "--no-andor",
         dest="andor_detection",
         help="disable detection of &&/||",
+        action="store_false",
+    )
+    parser.add_argument(
+        "--no-reroll",
+        dest="loop_rerolling",
+        help="disable detection and fixing of unrolled loops",
         action="store_false",
     )
     parser.add_argument(
@@ -228,6 +240,7 @@ def parse_flags(flags: List[str]) -> Options:
         void=args.void,
         ifs=args.ifs,
         andor_detection=args.andor_detection,
+        loop_rerolling=args.loop_rerolling,
         skip_casts=args.skip_casts,
         goto_patterns=args.goto_patterns,
         rodata_files=args.rodata_files,

@@ -124,7 +124,31 @@ class LabelStatement:
         return "\n".join(lines)
 
 
-Statement = Union[SimpleStatement, IfElseStatement, LabelStatement]
+@attr.s
+class DoWhileLoop:
+    indent: int = attr.ib()
+    coding_style: CodingStyle = attr.ib()
+
+    body: "Body" = attr.ib()
+    condition: Optional[Condition] = attr.ib(default=None)
+
+    def should_write(self) -> bool:
+        return True
+
+    def format(self, fmt: Formatter) -> str:
+        space = fmt.indent(self.indent, "")
+        after_do = f"\n{space}" if self.coding_style.newline_after_if else " "
+        cond = format_expr(self.condition, fmt) if self.condition else ""
+        return "\n".join(
+            [
+                f"{space}do{after_do}{{",
+                self.body.format(fmt),
+                f"{space}}} while ({cond});",
+            ]
+        )
+
+
+Statement = Union[SimpleStatement, IfElseStatement, LabelStatement, DoWhileLoop]
 
 
 @attr.s
@@ -153,6 +177,9 @@ class Body:
 
     def add_if_else(self, if_else: IfElseStatement) -> None:
         self.statements.append(if_else)
+
+    def add_do_while_loop(self, do_while_loop: DoWhileLoop) -> None:
+        self.statements.append(do_while_loop)
 
     def is_empty(self) -> bool:
         return not any(statement.should_write() for statement in self.statements)
@@ -196,6 +223,12 @@ def emit_goto(context: Context, target: Node, body: Body, indent: int) -> None:
     label = label_for_node(context, target)
     context.goto_nodes.add(target)
     body.add_statement(SimpleStatement(indent, f"goto {label};"))
+
+
+def create_goto(context: Context, target: Node, indent: int) -> SimpleStatement:
+    label = label_for_node(context, target)
+    context.goto_nodes.add(target)
+    return SimpleStatement(indent, f"goto {label};")
 
 
 def emit_switch_jump(
@@ -585,8 +618,52 @@ def add_return_statement(
         body.add_statement(SimpleStatement(indent, "return;"))
 
 
+def detect_loop(
+    context: Context, start: ConditionalNode, end: Node, indent: int
+) -> Optional[DoWhileLoop]:
+    # We detect edges that are accompanied by their reverse as loops.
+    imm_pdom: Node
+    if start.is_self_loop():
+        imm_pdom = start
+    else:
+        imm_pdom = immediate_postdominator(context, start, end)
+
+    if not (
+        isinstance(imm_pdom, ConditionalNode) and imm_pdom.conditional_edge is start
+    ):
+        return None
+
+    loop_body = Body(False, [])
+    emit_node(context, start, loop_body, indent + 1)
+
+    if not start.is_self_loop():
+        # There are more nodes to emit, "between" the start node
+        # and the loop edge that it connects to:
+        loop_body = build_flowgraph_between(
+            context,
+            start,
+            imm_pdom,
+            indent + 1,
+            skip_loop_detection=True,
+        )
+        emit_node(context, imm_pdom, loop_body, indent + 1)
+
+    assert imm_pdom.block.block_info
+    assert imm_pdom.block.block_info.branch_condition
+    return DoWhileLoop(
+        indent,
+        context.options.coding_style,
+        loop_body,
+        imm_pdom.block.block_info.branch_condition,
+    )
+
+
 def build_flowgraph_between(
-    context: Context, start: Node, end: Node, indent: int
+    context: Context,
+    start: Node,
+    end: Node,
+    indent: int,
+    skip_loop_detection: bool = False,
 ) -> Body:
     """
     Output a section of a flow graph that has already been translated to our
@@ -604,6 +681,22 @@ def build_flowgraph_between(
     while curr_start != end:
         # Write the current node (but return nodes are handled specially).
         if not isinstance(curr_start, ReturnNode):
+            # Before we do anything else, we pattern-match the subgraph
+            # rooted at curr_start against certain predefined subgraphs
+            # that emit do-while-loops:
+            if not skip_loop_detection and isinstance(curr_start, ConditionalNode):
+                do_while_loop = detect_loop(context, curr_start, end, indent)
+                if do_while_loop:
+                    body.add_do_while_loop(do_while_loop)
+                    # Move past the loop:
+                    if curr_start.is_self_loop():
+                        curr_start = curr_start.fallthrough_edge
+                    else:
+                        imm_pdom = immediate_postdominator(context, curr_start, end)
+                        assert isinstance(imm_pdom, ConditionalNode)
+                        curr_start = imm_pdom.fallthrough_edge
+                    continue
+
             # If a node is ever encountered twice, we can emit a goto to the
             # first place we emitted it. Since nodes represent positions in the
             # assembly, and we use phi's for preserved variable contents, this

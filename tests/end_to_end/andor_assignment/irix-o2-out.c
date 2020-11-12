@@ -65,13 +65,11 @@ s32 test(s32 arg0, s32 arg1, s32 arg2, s32 arg3) {
                     phi_v1_2 = temp_v1;
                     phi_v1_6 = temp_v1;
                     if (temp_v1 < 5) {
-loop_12:
-                        temp_t3 = (phi_v1_2 + 1) * 2;
-                        phi_v1_2 = temp_t3;
-                        phi_v1_6 = temp_t3;
-                        if (temp_t3 < 5) {
-                            goto loop_12;
-                        }
+                        do {
+                            temp_t3 = (phi_v1_2 + 1) * 2;
+                            phi_v1_2 = temp_t3;
+                            phi_v1_6 = temp_t3;
+                        } while ((temp_t3 < 5) != 0);
                     }
                     phi_s0_2 = temp_s0_2;
                     phi_t0_2 = temp_v0_2;
@@ -84,13 +82,11 @@ loop_12:
         phi_v1_4 = temp_v1_2;
         phi_v1_7 = temp_v1_2;
         if (temp_v1_2 < 5) {
-loop_19:
-            temp_t5 = (phi_v1_4 + 1) * 2;
-            phi_v1_4 = temp_t5;
-            phi_v1_7 = temp_t5;
-            if (temp_t5 < 5) {
-                goto loop_19;
-            }
+            do {
+                temp_t5 = (phi_v1_4 + 1) * 2;
+                phi_v1_4 = temp_t5;
+                phi_v1_7 = temp_t5;
+            } while ((temp_t5 < 5) != 0);
         }
         phi_v1_5 = phi_v1_7 + 5;
     } else {

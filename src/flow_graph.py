@@ -1,3 +1,4 @@
+import abc
 import copy
 import typing
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, Union
@@ -630,22 +631,52 @@ def build_blocks(function: Function, rodata: Rodata) -> List[Block]:
     return block_builder.get_blocks()
 
 
+def is_self_loop_edge(node: "Node", edge: "Node") -> bool:
+    return node is edge
+
+
 def is_loop_edge(node: "Node", edge: "Node") -> bool:
     # Loops are represented by backwards jumps.
     return edge.block.index <= node.block.index
 
 
+# TODO: Nodes need to be frozen.
+# We use dictionaries and sets of nodes throughout the codebase,
+# and it would be helpful to define __eq__ using `self.block.index`.
+# This would also keep code from silently modifying Nodes.
+# It just makes more sense.
 @attr.s(eq=False)
-class BaseNode:
+class BaseNode(abc.ABC):
     block: Block = attr.ib()
     emit_goto: bool = attr.ib()
-    parents: List["Node"] = attr.ib(init=False, factory=list)
+    parents: Set["Node"] = attr.ib(init=False, factory=set)
     dominators: Set["Node"] = attr.ib(init=False, factory=set)
     immediate_dominator: Optional["Node"] = attr.ib(init=False, default=None)
     immediately_dominates: List["Node"] = attr.ib(init=False, factory=list)
 
+    def to_basic_node(self, successor: "Node") -> "BasicNode":
+        new_node = BasicNode(self.block, self.emit_goto, successor)
+        new_node.parents = self.parents
+        new_node.dominators = self.dominators
+        new_node.immediate_dominator = self.immediate_dominator
+        new_node.immediately_dominates = self.immediately_dominates
+        return new_node
+
     def add_parent(self, parent: "Node") -> None:
-        self.parents.append(parent)
+        self.parents.add(parent)
+
+    def replace_parent(self, replace_this: "Node", with_this: "Node") -> None:
+        if replace_this in self.parents:
+            self.parents.remove(replace_this)
+            self.parents.add(with_this)
+
+    @abc.abstractmethod
+    def children(self) -> List["Node"]:
+        ...
+
+    @abc.abstractmethod
+    def replace_any_children(self, replace_this: "Node", with_this: "Node") -> None:
+        ...
 
     def name(self) -> str:
         return str(self.block.index)
@@ -655,8 +686,15 @@ class BaseNode:
 class BasicNode(BaseNode):
     successor: "Node" = attr.ib()
 
+    def replace_any_children(self, replace_this: "Node", with_this: "Node") -> None:
+        if self.successor is replace_this:
+            self.successor = with_this
+
     def is_loop(self) -> bool:
         return is_loop_edge(self, self.successor)
+
+    def children(self) -> List["Node"]:
+        return [self.successor]
 
     def __str__(self) -> str:
         return "".join(
@@ -674,8 +712,20 @@ class ConditionalNode(BaseNode):
     conditional_edge: "Node" = attr.ib()
     fallthrough_edge: "Node" = attr.ib()
 
+    def replace_any_children(self, replace_this: "Node", with_this: "Node") -> None:
+        if self.conditional_edge is replace_this:
+            self.conditional_edge = with_this
+        if self.fallthrough_edge is replace_this:
+            self.fallthrough_edge = with_this
+
+    def is_self_loop(self) -> bool:
+        return is_self_loop_edge(self, self.conditional_edge)
+
     def is_loop(self) -> bool:
         return is_loop_edge(self, self.conditional_edge)
+
+    def children(self) -> List["Node"]:
+        return [self.conditional_edge, self.fallthrough_edge]
 
     def __str__(self) -> str:
         return "".join(
@@ -695,9 +745,15 @@ class ConditionalNode(BaseNode):
 class ReturnNode(BaseNode):
     index: int = attr.ib()
 
+    def replace_any_children(self, replace_this: "Node", with_this: "Node") -> None:
+        pass
+
     def name(self) -> str:
         name = super().name()
         return name if self.is_real() else f"{name}.{self.index}"
+
+    def children(self) -> List["Node"]:
+        return []
 
     def is_real(self) -> bool:
         return self.index == 0
@@ -715,6 +771,19 @@ class ReturnNode(BaseNode):
 @attr.s(eq=False)
 class SwitchNode(BaseNode):
     cases: List["Node"] = attr.ib()
+
+    def replace_any_children(self, replace_this: "Node", with_this: "Node") -> None:
+        new_cases: List["Node"] = []
+        for case in self.cases:
+            if case is replace_this:
+                new_cases.append(with_this)
+                with_this.add_parent(self)
+            else:
+                new_cases.append(case)
+        self.cases = new_cases
+
+    def children(self) -> List["Node"]:
+        return self.cases
 
     def __str__(self) -> str:
         targets = ", ".join(str(c.block.index) for c in self.cases)
@@ -986,7 +1055,22 @@ def ensure_fallthrough(nodes: List[Node]) -> None:
             pre.emit_goto = True
 
 
-def compute_dominators(nodes: List[Node]) -> None:
+def compute_parents(nodes: List[Node]) -> None:
+    for node in nodes:
+        node.parents = set()
+    for node in nodes:
+        for child in node.children():
+            child.parents.add(node)
+
+
+def compute_dominators_and_parents(nodes: List[Node]) -> None:
+    """Compute or recompute the dominators and parents of the given nodes."""
+    for node in nodes:
+        node.dominators = set()
+        node.immediate_dominator = None
+        node.immediately_dominates = []
+    compute_parents(nodes)
+
     entry = nodes[0]
     entry.dominators = {entry}
     for n in nodes[1:]:
@@ -1034,7 +1118,7 @@ def build_flowgraph(function: Function, rodata: Rodata) -> FlowGraph:
     nodes = build_nodes(function, blocks, rodata)
     nodes = duplicate_premature_returns(nodes)
     ensure_fallthrough(nodes)
-    compute_dominators(nodes)
+    compute_dominators_and_parents(nodes)
     return FlowGraph(nodes)
 
 
