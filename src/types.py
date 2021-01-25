@@ -6,6 +6,7 @@ import pycparser.c_ast as ca
 from .c_types import (
     CType,
     TypeMap,
+    StructField,
     equal_types,
     get_struct,
     primitive_size,
@@ -314,8 +315,109 @@ def get_field(
                     type_from_ctype(field.type, typemap),
                     *ptr_type_from_ctype(field.type, typemap),
                 )
+            # if the struct has no usable field, make one
+            else:
+                return get_field_do_struct_edit(type, offset, typemap, ctype, struct, target_size=target_size)
     return None, Type.any(), Type.ptr(), False
 
+# arguments follow get_field names, apart from target_offset (offset in get_field)
+def get_field_do_struct_edit(
+    type: Type, target_offset: int, typemap: TypeMap, ctype: ca.TypeDecl, struct: ca.Struct, *, target_size: Optional[int]
+) -> Tuple[Optional[str], Type, Type, bool]:
+    # find field with biggest offset which is below target offset
+    offset = target_offset
+    fields = None
+    while not fields and offset > 0:
+        offset -= 1
+        fields = struct.fields.get(offset)
+    if fields:
+        #TODO understand target_size=None meaning
+        if target_size is None:
+            print('target_size is None')
+        else:
+            # find a field extending up to offset + target_size
+            ind = 0
+            field = None
+            # for each fields[ind] which doesn't hold a struct
+            while ind < len(fields) and not field:
+                while ind + 1 < len(fields) and fields[ind + 1].name.startswith(
+                    fields[ind].name + "."
+                ):
+                    ind += 1
+                # fields[ind].size takes into account array size
+                # if target offset range is inside fields[ind]
+                if offset + fields[ind].size >= target_offset + target_size:
+                    field = fields[ind]
+                else:
+                    ind += 1
+            # we may want to loop more if field isn't right, but this should do for most cases
+            # if field is an unk_* array
+            if field and isinstance(field.type, ca.ArrayDecl) and field.name.startswith('unk_'):
+                # split unk_* into a "before" array (field), the new target field (new_field),
+                # and an "after" array (field2)
+                length = field.type.dim.value
+                # hoping unhandled cases will raise errors and not silently do weird stuff
+                if length.startswith('0x'):
+                    length = int(length, 16)
+                elif length.startswith('0'):
+                    length = int(length, 8)
+                else:
+                    length = int(length, 10)
+                # TODO handle non-char arrays? requires more work because splitting is harder
+                if length != field.size:
+                    print('{} not a char array'.format(field.name))
+                #TODO test more
+                #TODO remove zero-length array fields
+                # resize field so it ends at target_offset
+                field.size = target_offset - offset
+                field.type.dim.value = str(field.size)
+                # new used target field from target_offset to target_offset+target_size
+                new_field_name = 'unk_{}'.format(hex(target_offset)[2:].upper())
+                #TODO better way to handle pycparser types?
+                new_field_ctype = ca.TypeDecl(
+                    declname = new_field_name,
+                    quals = [],
+                    #TODO because we write this stuff early we can't have better type infos
+                    type = ca.IdentifierType(names=['?{}B'.format(target_size)])
+                )
+                new_field = StructField(type=new_field_ctype,size=target_size,name=new_field_name)
+                struct.fields[target_offset].append(new_field)
+                # new unk_* field from target_offset+target_size to initial array field end
+                field2name = 'unk_{}'.format(hex(target_offset+target_size)[2:].upper())
+                field2size = offset+length - (target_offset+target_size)
+                field2 = StructField(
+                    type=ca.ArrayDecl(
+                        type=ca.TypeDecl(
+                            declname=field2name,
+                            quals=[],
+                            type=ca.IdentifierType(names=['char'])
+                        ),
+                        dim=ca.Constant(type='int',value=hex(field2size)),
+                        dim_quals=[]
+                    ), size=field2size, name=field2name)
+                struct.fields[target_offset+target_size].append(field2)
+                print('## Struct Edit Start ##')
+                print('In {} replaced char {}[{}] by:'.format(ctype.declname, field.name, length))
+                print('char {}[{}];'.format(field.type.type.declname, field.type.dim.value))
+                print('{} {};'.format(new_field.type.type.names[0], new_field.type.declname))
+                print('char {}[{}];'.format(field2.type.type.declname, field2.type.dim.value))
+                print('## Struct Edit End   ##')
+                return (
+                    new_field.name,
+                    #TODO this may cause issues: we confirm what the instructions want
+                    # by modifying the struct accordingly, this is not confirmation of
+                    # type but likely is interpreted as such
+                    # (Type.any() could be used, but what about is_array?)
+                    Type.of_size(target_size),
+                    Type.ptr(),
+                    False
+                )
+            # target is overlapping with a field which isn't an array or isn't named unk_*
+            # assuming the existing field has uses, there's a conflict. May be caused by a union?
+            else:
+                print('Conflicting?')
+
+    return None, Type.any(), Type.ptr(), False
 
 def find_substruct_array(
     type: Type, offset: int, scale: int, typemap: TypeMap
